@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 from app.models import RiskFeatures, RiskResult
 from app.services.engine import RiskEngine
+from app.services.stats import stats_collector
 
 router = APIRouter(prefix="/risk", tags=["风控"])
 
-engine = RiskEngine.with_default_rules()
+engine = RiskEngine.with_default_rules(stats_collector=stats_collector)
 
 
 @router.post("/predict", response_model=RiskResult, summary="风险评估")

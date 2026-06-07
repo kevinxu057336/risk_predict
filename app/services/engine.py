@@ -15,22 +15,26 @@ from app.services.rules.same_device_diff_account import SameDeviceDiffAccountRul
 from app.services.rules.new_user_large_order import NewUserLargeOrderRule
 from app.services.rules.batch_registration import BatchRegistrationRule
 from app.services.rules.high_return_rate import HighReturnRateRule
+from app.services.stats import RiskStatsCollector
+from app.services import metrics as risk_metrics
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_FILE = LOG_DIR / "decisions.jsonl"
 
 
 class RiskEngine:
-    """规则引擎：注册规则 → 逐条执行 → 汇总打分"""
+    """规则引擎：注册规则 → 逐条执行 → 汇总打分 → 日志 + 统计 + Prometheus"""
 
-    def __init__(self, log_decisions: bool = True):
+    def __init__(self, log_decisions: bool = True, stats_collector: RiskStatsCollector | None = None):
         self.rules: list[BaseRule] = []
         self.log_decisions = log_decisions
+        self.stats = stats_collector
 
     def register(self, rule: BaseRule) -> None:
         self.rules.append(rule)
 
     def evaluate(self, features: RiskFeatures) -> RiskResult:
+        t0 = time.perf_counter()
         total = 0
         details: list[RuleDetail] = []
         reasons: list[str] = []
@@ -57,9 +61,15 @@ class RiskEngine:
             level = "low"
 
         risk_result = RiskResult(score=total, risk_level=level, details=details, reasons=reasons)
+        elapsed = time.perf_counter() - t0
 
         if self.log_decisions:
             self._write_log(features, risk_result)
+
+        if self.stats:
+            self.stats.record(features, risk_result)
+
+        risk_metrics.record_metrics(features, risk_result, elapsed)
 
         return risk_result
 
@@ -74,9 +84,9 @@ class RiskEngine:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     @classmethod
-    def with_default_rules(cls) -> RiskEngine:
+    def with_default_rules(cls, stats_collector: RiskStatsCollector | None = None) -> RiskEngine:
         """创建预装全部规则的引擎"""
-        engine = cls()
+        engine = cls(stats_collector=stats_collector)
         engine.register(LargeAmountRule())
         engine.register(HighFrequencyRule())
         engine.register(LateNightRule())

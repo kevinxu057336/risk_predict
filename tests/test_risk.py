@@ -105,9 +105,35 @@ def test_rule_details_in_response():
     })
     data = resp.json()
     assert "details" in data
-    # 全部 9 条规则都有明细记录（不管是否命中）
     assert len(data["details"]) == 9
     for d in data["details"]:
         assert "rule_name" in d
         assert "triggered" in d
         assert "score" in d
+
+
+def test_stats_endpoint():
+    """/stats 返回聚合统计"""
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "total_predictions" in data
+    assert "window" in data
+    assert "rule_trigger_rates" in data
+    assert "risk_level_distribution" in data
+    assert "score_distribution" in data
+    assert "amount_distribution" in data
+    assert "hour_distribution" in data
+    assert data["total_predictions"] > 0
+
+
+def test_metrics_endpoint():
+    """/metrics 返回 Prometheus 格式"""
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "risk_score" in body
+    assert "risk_rule_triggers_total" in body
+    assert "risk_level_total" in body
+    assert "risk_order_amount" in body
+    assert "risk_prediction_total" in body
