@@ -16,7 +16,11 @@ uvicorn app.main:app --reload --port 8000
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查 |
-| POST | `/risk/predict` | 风险评估（9条规则并行执行） |
+| POST | `/risk/predict` | 风险评估（9条规则并行执行，限流100次/分钟） |
+| GET | `/risk/cache/info` | 缓存状态信息 |
+| GET | `/stats` | 风险指标聚合统计（规则命中率、分布、趋势） |
+| POST | `/stats/reload-config` | 热更新配置（无需重启） |
+| GET | `/metrics` | Prometheus 指标 |
 | GET | `/docs` | Swagger 文档 |
 
 ## curl 示例
@@ -39,6 +43,7 @@ curl -X POST http://localhost:8000/risk/predict \
 # 高风险：新用户深夜买白酒 + 大额 + 新设备 + 同IP多号
 curl -X POST http://localhost:8000/risk/predict \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secret-key" \
   -d '{
     "order_amount":6000,"order_count_1h":7,"order_count_24h":25,
     "hour_of_day":3,"product_category":"白酒",
@@ -71,10 +76,30 @@ curl -X POST http://localhost:8000/risk/predict \
 }
 ```
 
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `RISK_API_KEY` | 空（不启用） | API Key 认证密钥，设置后写接口需携带 `X-API-Key` Header |
+| `RISK_CONFIG_PATH` | `config/rules_config.yaml` | 自定义配置文件路径 |
+| `RISK_TRACING_ENABLED` | `false` | 启用 OpenTelemetry 链路追踪 |
+| `RISK_TRACE_EXPORTER` | `console` | 链路追踪导出方式 |
+
+## 配置中心
+
+所有规则阈值均通过 `config/rules_config.yaml` 管理，支持运行时热更新：
+
+```bash
+# 修改配置后，无需重启
+curl -X POST http://localhost:8000/stats/reload-config
+```
+
+配置项包括：每条规则的阈值与分数、引擎评分上限、风险等级阈值、缓存开关与TTL、日志轮转策略、限流参数等。
+
 ## 运行测试
 
 ```bash
-pytest -v                          # 全部测试
+pytest -v                          # 全部测试（12个）
 pytest tests/test_risk.py -v       # 单文件
 ```
 
@@ -83,18 +108,35 @@ pytest tests/test_risk.py -v       # 单文件
 ```bash
 docker build -t risk-api .
 docker run -p 8000:8000 risk-api
+
+# 启用 API Key 认证
+docker run -p 8000:8000 -e RISK_API_KEY=your-secret-key risk-api
+
+# 启用链路追踪
+docker run -p 8000:8000 -e RISK_TRACING_ENABLED=true risk-api
 ```
 
 ## 项目结构
 
 ```
 app/
-├── main.py                       # FastAPI 入口
-├── models.py                     # Pydantic 模型
-├── routers/risk.py               # 路由层
+├── main.py                          # FastAPI 入口（lifespan + 中间件注册）
+├── models.py                        # Pydantic 模型
+├── middleware/
+│   ├── auth.py                      # API Key 认证中间件
+│   └── rate_limit.py                # 限流中间件（slowapi）
+├── routers/
+│   ├── risk.py                      # /risk/predict 路由
+│   └── stats.py                     # /stats + /stats/reload-config 路由
 └── services/
-    ├── engine.py                 # 规则引擎（注册 + 编排 + 日志）
-    └── rules/                    # 9 条独立规则文件
+    ├── engine.py                    # 规则引擎（并行执行 + 容错隔离 + 缓存 + 日志轮转）
+    ├── config.py                    # YAML 配置中心（单例 + 热更新）
+    ├── cache.py                     # LRU+TTL 结果缓存
+    ├── stats.py                     # 内存聚合统计器
+    ├── metrics.py                   # Prometheus 自定义指标
+    ├── tracing.py                   # OpenTelemetry 链路追踪
+    ├── log_rotation.py              # 决策日志轮转
+    └── rules/                       # 9 条独立规则文件
         ├── base.py
         ├── large_amount.py
         ├── high_frequency.py
@@ -105,8 +147,33 @@ app/
         ├── new_user_large_order.py
         ├── batch_registration.py
         └── high_return_rate.py
+config/
+└── rules_config.yaml                # 规则阈值配置文件
 tests/
-└── test_risk.py
+└── test_risk.py                     # 12 个测试用例
 logs/
-└── decisions.jsonl              # 决策日志（自动生成）
+└── decisions.jsonl                  # 决策日志（自动生成 + 轮转）
 ```
+
+## 架构特性
+
+| 特性 | 说明 |
+|------|------|
+| **规则容错隔离** | 单条规则异常不影响整体评估，记0分并告警 |
+| **并行执行** | `asyncio.gather` 并行评估9条规则，降低延迟 |
+| **阈值可配置** | YAML 配置中心，`POST /stats/reload-config` 运行时热更新 |
+| **限流保护** | slowapi 限流，默认100次/分钟 |
+| **API Key 认证** | 环境变量控制，保护写接口 |
+| **结果缓存** | LRU + TTL 内存缓存，相同特征直接返回 |
+| **优雅停机** | lifespan 事件，关闭时保存统计快照 |
+| **链路追踪** | OpenTelemetry 集成，环境变量一键开启 |
+| **日志轮转** | 按大小切割（默认50MB），保留5个备份 |
+| **Docker 加固** | 多阶段构建、非 root 用户、HEALTHCHECK |
+
+## 如何新增一条规则
+
+1. 在 `app/services/rules/` 下新建文件，继承 `BaseRule`
+2. 设置 `name`、`description`，实现 `evaluate(features) -> RuleResult`
+3. 在 `config/rules_config.yaml` 中添加对应阈值配置
+4. 在 `engine.py` 的 `with_default_rules()` 中 `register(NewRule())`
+5. 写对应测试用例

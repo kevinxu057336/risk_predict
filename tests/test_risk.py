@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("RISK_API_KEY", "")
+
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -11,7 +14,6 @@ def test_health():
 
 
 def test_predict_low_risk():
-    """正常订单 → low risk"""
     resp = client.post("/risk/predict", json={
         "order_amount": 200,
         "order_count_1h": 1,
@@ -34,7 +36,6 @@ def test_predict_low_risk():
 
 
 def test_predict_high_risk():
-    """多项规则同时命中 → high risk"""
     resp = client.post("/risk/predict", json={
         "order_amount": 6000,
         "order_count_1h": 7,
@@ -56,13 +57,11 @@ def test_predict_high_risk():
     data = resp.json()
     assert data["risk_level"] == "high"
     assert data["score"] == 100
-    # 9 条规则至少命中 7 条以上
     triggered = [d for d in data["details"] if d["triggered"]]
     assert len(triggered) >= 7
 
 
 def test_predict_medium_risk():
-    """部分规则命中 → medium risk"""
     resp = client.post("/risk/predict", json={
         "order_amount": 3000,
         "order_count_1h": 4,
@@ -83,13 +82,11 @@ def test_predict_medium_risk():
 
 
 def test_predict_validation_error():
-    """缺少必填字段 → 422"""
     resp = client.post("/risk/predict", json={"order_amount": -1})
     assert resp.status_code == 422
 
 
 def test_rule_details_in_response():
-    """响应中包含每条规则的明细"""
     resp = client.post("/risk/predict", json={
         "order_amount": 200,
         "order_count_1h": 1,
@@ -113,7 +110,6 @@ def test_rule_details_in_response():
 
 
 def test_stats_endpoint():
-    """/stats 返回聚合统计"""
     resp = client.get("/stats")
     assert resp.status_code == 200
     data = resp.json()
@@ -128,7 +124,6 @@ def test_stats_endpoint():
 
 
 def test_metrics_endpoint():
-    """/metrics 返回 Prometheus 格式"""
     resp = client.get("/metrics")
     assert resp.status_code == 200
     body = resp.text
@@ -137,3 +132,65 @@ def test_metrics_endpoint():
     assert "risk_level_total" in body
     assert "risk_order_amount" in body
     assert "risk_prediction_total" in body
+
+
+def test_rule_fault_tolerance():
+    from app.services.engine import RiskEngine
+    from app.services.rules.base import BaseRule, RuleResult
+    from app.models import RiskFeatures
+
+    class BrokenRule(BaseRule):
+        name = "broken_rule"
+        description = "故意抛异常的规则"
+
+        def evaluate(self, f: RiskFeatures) -> RuleResult:
+            raise ValueError("故意出错")
+
+    engine = RiskEngine(log_decisions=False)
+    engine.register(BrokenRule())
+
+    import asyncio
+    features = RiskFeatures(order_amount=100, hour_of_day=10)
+    result = asyncio.run(engine.evaluate(features))
+
+    assert result.score == 0
+    assert result.risk_level == "low"
+    broken_detail = [d for d in result.details if d.rule_name == "broken_rule"][0]
+    assert broken_detail.triggered is False
+    assert "规则执行异常" in broken_detail.reason
+
+
+def test_cache_endpoint():
+    resp = client.get("/risk/cache/info")
+    assert resp.status_code == 200
+
+
+def test_reload_config():
+    resp = client.post("/stats/reload-config")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_api_key_auth():
+    import os
+    original = os.environ.get("RISK_API_KEY", "")
+    os.environ["RISK_API_KEY"] = "test-secret-key"
+
+    from app.middleware.auth import API_KEY
+    import app.middleware.auth as auth_mod
+    auth_mod.API_KEY = "test-secret-key"
+
+    resp = client.post("/risk/predict", json={
+        "order_amount": 200,
+        "hour_of_day": 14,
+    })
+    assert resp.status_code == 401
+
+    resp = client.post("/risk/predict", json={
+        "order_amount": 200,
+        "hour_of_day": 14,
+    }, headers={"X-API-Key": "test-secret-key"})
+    assert resp.status_code == 200
+
+    os.environ["RISK_API_KEY"] = original
+    auth_mod.API_KEY = original

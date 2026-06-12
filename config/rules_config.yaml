@@ -1,0 +1,71 @@
+rules:
+  large_amount:
+    high_threshold: 5000
+    medium_threshold: 2000
+    high_score: 30
+    medium_score: 15
+    liquor_extra_score: 5
+  high_frequency:
+    count_1h_high: 5
+    count_1h_medium: 3
+    count_24h_high: 20
+    score_1h_high: 25
+    score_1h_medium: 10
+    score_24h_high: 20
+  late_night:
+    start_hour: 2
+    end_hour: 5
+    score: 20
+  new_device:
+    score: 10
+    large_amount_threshold: 1000
+  same_ip_diff_phone:
+    high_threshold: 5
+    medium_threshold: 3
+    high_score: 30
+    medium_score: 15
+  same_device_diff_account:
+    high_threshold: 3
+    medium_threshold: 1
+    high_score: 25
+    medium_score: 10
+  new_user_large_order:
+    amount_high: 2000
+    amount_medium: 1000
+    amount_low: 500
+    score_high: 30
+    score_medium: 20
+    score_low: 10
+    new_day_threshold: 1
+    new_day_score: 10
+    max_score: 40
+  batch_registration:
+    high_threshold: 20
+    medium_threshold: 10
+    low_threshold: 5
+    high_score: 30
+    medium_score: 20
+    low_score: 10
+  high_return_rate:
+    high_threshold: 0.3
+    medium_threshold: 0.15
+    high_score: 20
+    medium_score: 10
+    max_score: 40
+
+engine:
+  score_cap: 100
+  high_threshold: 60
+  medium_threshold: 30
+
+cache:
+  enabled: true
+  ttl_seconds: 30
+  max_size: 1000
+
+rate_limit:
+  predict_per_minute: 100
+
+log:
+  max_file_size_mb: 50
+  max_backup_count: 5
